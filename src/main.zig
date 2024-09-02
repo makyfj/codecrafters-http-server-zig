@@ -37,6 +37,8 @@ pub fn main() !void {
 
     if (std.mem.eql(u8, path, "/")) {
         try client.stream.writeAll("HTTP/1.1 200 OK\r\n\r\n");
+    } else {
+        try client.stream.writeAll("HTTP/1.1 400 Not Found\r\n\r\n");
     }
 
     // Send a response to the client
