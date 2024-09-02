@@ -18,6 +18,4 @@ pub fn main() !void {
 
     // Send a response to the client
     try client.stream.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\nHello, world!");
-
-    // try stdout.print("client connected!", .{});
 }
