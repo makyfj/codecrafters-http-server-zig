@@ -26,21 +26,24 @@ pub fn main() !void {
     var lines = std.mem.splitSequence(u8, request, "\r\n");
 
     const first_line = lines.next() orelse return error.InvalidRequest;
-    var parts = std.mem.split(u8, first_line, " ");
+    var parts = std.mem.splitSequence(u8, first_line, " ");
     _ = parts.next() orelse return error.InvalidRequest;
     const path = parts.next() orelse return error.InvalidRequest;
     _ = parts.next() orelse return error.InvalidRequest;
 
-    if (std.mem.eql(u8, path, "/abcdefg")) {
-        try client.stream.writeAll("HTTP/1.1 404 Not Found\r\n\r\n");
-    }
-
-    if (std.mem.eql(u8, path, "/")) {
-        try client.stream.writeAll("HTTP/1.1 200 OK\r\n\r\n");
+    if (std.mem.startsWith(u8, path, "/echo/")) {
+        const body = path[6..];
+        const body_len = body.len;
+        const body_content = try std.fmt.allocPrint(std.heap.page_allocator, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {d}\r\n\r\n{s}", .{ body_len, body });
+        defer std.heap.page_allocator.free(body_content);
+        try client.stream.writeAll(body_content);
+    } else if (std.mem.eql(u8, path, "/")) {
+        const body = path[1..];
+        const body_len = body.len;
+        const body_content = try std.fmt.allocPrint(std.heap.page_allocator, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {d}\r\n\r\n{s}", .{ body_len, body });
+        defer std.heap.page_allocator.free(body_content);
+        try client.stream.writeAll(body_content);
     } else {
         try client.stream.writeAll("HTTP/1.1 404 Not Found\r\n\r\n");
     }
-
-    // Send a response to the client
-    // try client.stream.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\nHello, world!");
 }
