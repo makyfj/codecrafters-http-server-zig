@@ -4,10 +4,23 @@ const net = std.net;
 const PORT = 4221;
 const HOST = "127.0.0.1";
 
+var files_directory: []const u8 = undefined;
+
 pub fn main() !void {
     const stdout = std.io.getStdOut().writer();
 
     try stdout.print("Logs from your program will appear here!\n", .{});
+
+    // Parse command line arguments
+    const args = try std.process.argsAlloc(std.heap.page_allocator);
+    defer std.process.argsFree(std.heap.page_allocator, args);
+
+    if (args.len >= 3 and std.mem.eql(u8, args[1], "--directory")) {
+        files_directory = args[2];
+        try stdout.print("Files directory: {s}\n", .{files_directory});
+    } else {
+        try stdout.print("No directory specified. File serving will be disabled.\n", .{});
+    }
 
     const address = try net.Address.resolveIp(HOST, PORT);
 
@@ -59,52 +72,79 @@ fn handleClient(client: net.Server.Connection) !void {
     // Split the first line into parts (method, URL, and HTTP version)
     var parts = std.mem.splitSequence(u8, first_line, " ");
 
-    // Get the request method
+    // Request method
     _ = parts.next() orelse return error.InvalidRequest;
 
-    // Get the URL path
+    // URL path
     const path = parts.next() orelse return error.InvalidRequest;
 
-    // Get the HTTP version
+    // HTTP version
     _ = parts.next() orelse return error.InvalidRequest;
 
     var user_agent: ?[]const u8 = null;
 
     while (lines.next()) |line| {
-
-        // Check if the line is the User-Agent header
         if (std.mem.startsWith(u8, line, "User-Agent: ")) {
-            // Extract the User-Agent value
             user_agent = line["User-Agent: ".len..];
-            // Break out of the loop since we've found the User-Agent header
             break;
         }
     }
 
     // Handle the request based on the URL path
     if (std.mem.eql(u8, path, "/")) {
-        // Handle the root URL
         try sendResponse(client, "200 OK", "text/plain", "");
     } else if (std.mem.startsWith(u8, path, "/echo/")) {
-        // Handle the /echo/ URL
         const echo_path = path[6..];
         try sendResponse(client, "200 OK", "text/plain", echo_path);
     } else if (std.mem.eql(u8, path, "/user-agent")) {
-        // Handle the /user-agent URL
         try sendResponse(client, "200 OK", "text/plain", user_agent orelse "");
+    } else if (std.mem.startsWith(u8, path, "/files/")) {
+        if (files_directory.len > 0) {
+            const filename = path[7..];
+            try handleFileRequest(client, files_directory, filename);
+        } else {
+            try sendResponse(client, "404 Not Found", "text/plain", "");
+        }
     } else {
-        // Handle unknown URLs
         try sendResponse(client, "404 Not Found", "text/plain", "");
     }
 }
 
 fn sendResponse(client: net.Server.Connection, status: []const u8, content_type: []const u8, content: []const u8) !void {
-    // Create a response string
     const response = try std.fmt.allocPrint(std.heap.page_allocator, "HTTP/1.1 {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\n\r\n{s}", .{ status, content_type, content.len, content });
 
-    // Deallocate the response string when it's no longer needed
     defer std.heap.page_allocator.free(response);
 
-    // Write the response to the client's stream
     try client.stream.writeAll(response);
+}
+
+fn handleFileRequest(client: net.Server.Connection, dir: []const u8, filename: []const u8) !void {
+    const full_path = try std.fs.path.join(std.heap.page_allocator, &[_][]const u8{ dir, filename });
+    defer std.heap.page_allocator.free(full_path);
+
+    try std.io.getStdOut().writer().print("File requested: {s}\n", .{full_path});
+
+    const file = std.fs.openFileAbsolute(full_path, .{ .mode = .read_only }) catch |err| {
+        if (err == error.FileNotFound) {
+            try sendResponse(client, "404 Not Found", "application/octet-stream", "");
+            return;
+        }
+        return err;
+    };
+
+    defer file.close();
+
+    const file_size = try file.getEndPos();
+    try std.io.getStdOut().writer().print("File size: {d}\n", .{file_size});
+    var buffer = try std.heap.page_allocator.alloc(u8, file_size + 1);
+    defer std.heap.page_allocator.free(buffer);
+
+    const bytes_read = try file.readAll(buffer);
+
+    const content_type = "application/octet-stream";
+    const response = try std.fmt.allocPrint(std.heap.page_allocator, "HTTP/1.1 200 OK\r\nContent-Type: {s}\r\nContent-Length: {d}\r\n\r\n", .{ content_type, bytes_read });
+    defer std.heap.page_allocator.free(response);
+
+    try client.stream.writeAll(response);
+    try client.stream.writeAll(buffer[0..bytes_read]);
 }
