@@ -56,7 +56,7 @@ fn handleClientThread(client_ptr: *net.Server.Connection) void {
 
 fn handleClient(client: net.Server.Connection) !void {
     // Create a buffer to store the client's request
-    var buffer: [1024]u8 = undefined;
+    var buffer: [4096]u8 = undefined;
 
     // Read the client's request into the buffer
     const bytes_read = try client.stream.read(&buffer);
@@ -85,14 +85,25 @@ fn handleClient(client: net.Server.Connection) !void {
     var content_length: ?usize = null;
 
     while (lines.next()) |line| {
-        try std.io.getStdOut().writer().print("Line: {s}\n", .{line});
-    }
-
-    while (lines.next()) |line| {
         if (std.mem.startsWith(u8, line, "User-Agent: ")) {
             user_agent = line["User-Agent: ".len..];
         } else if (std.mem.startsWith(u8, line, "Content-Length: ")) {
-            content_length = try std.fmt.parseInt(usize, line["Content-Length: ".len..], 10);
+            content_length = std.fmt.parseInt(usize, line["Content-Length: ".len..], 10) catch null;
+        }
+    }
+
+    // Read the request body if Content-Length is present
+    var body: []u8 = &[_]u8{};
+    if (content_length) |length| {
+        // Find the end of the headers
+        const headers_end = std.mem.indexOfPos(u8, request, 0, "\r\n\r\n") orelse return error.InvalidRequest;
+
+        // Check if the entire body is present in the request
+        if (headers_end + 4 + length <= request.len) {
+            // Extract the body from the request
+            // Start from the end of headers + 4 (for the double CRLF)
+            // End at the calculated position based on Content-Length
+            body = request[headers_end + 4 .. headers_end + 4 + length];
         }
     }
 
@@ -110,10 +121,11 @@ fn handleClient(client: net.Server.Connection) !void {
             if (std.mem.eql(u8, method, "GET")) {
                 try handleFileRequest(client, files_directory, filename);
             } else if (std.mem.eql(u8, method, "POST")) {
-                var body_buffer = try std.heap.page_allocator.alloc(u8, content_length orelse return error.MissingContentLength);
-                defer std.heap.page_allocator.free(body_buffer);
-                _ = try client.stream.read(body_buffer);
-                try handleFileCreation(client, files_directory, filename, body_buffer[0 .. content_length orelse return error.MissingContentLength]);
+                if (content_length != null and body.len > 0) {
+                    try handleFileCreation(client, files_directory, filename, body);
+                } else {
+                    try sendResponse(client, "400 Bad Request", "text/plain", "Missing or Invalid Content-Length Header");
+                }
             } else {
                 try sendResponse(client, "405 Method Not Allowed", "text/plain", "");
             }
@@ -150,8 +162,7 @@ fn handleFileRequest(client: net.Server.Connection, dir: []const u8, filename: [
     defer file.close();
 
     const file_size = try file.getEndPos();
-    try std.io.getStdOut().writer().print("File size: {d}\n", .{file_size});
-    var buffer = try std.heap.page_allocator.alloc(u8, file_size + 1);
+    var buffer = try std.heap.page_allocator.alloc(u8, file_size);
     defer std.heap.page_allocator.free(buffer);
 
     const bytes_read = try file.readAll(buffer);
@@ -160,8 +171,8 @@ fn handleFileRequest(client: net.Server.Connection, dir: []const u8, filename: [
     const response = try std.fmt.allocPrint(std.heap.page_allocator, "HTTP/1.1 200 OK\r\nContent-Type: {s}\r\nContent-Length: {d}\r\n\r\n", .{ content_type, bytes_read });
     defer std.heap.page_allocator.free(response);
 
-    try client.stream.writeAll(response);
-    try client.stream.writeAll(buffer[0..bytes_read]);
+    try client.stream.writeAll(response); // Send the HTTP headers
+    try client.stream.writeAll(buffer[0..bytes_read]); // Send the file content separately
 }
 
 fn handleFileCreation(client: net.Server.Connection, dir: []const u8, filename: []const u8, content: []const u8) !void {
