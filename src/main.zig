@@ -1,48 +1,47 @@
-// Import the standard library and its networking module
 const std = @import("std");
 const net = std.net;
 
 const PORT = 4221;
 const HOST = "127.0.0.1";
 
-// The main entry point of the program
 pub fn main() !void {
-    // Get a writer for the standard output stream
     const stdout = std.io.getStdOut().writer();
 
-    // Print a message to the standard output stream
     try stdout.print("Logs from your program will appear here!\n", .{});
 
-    // Resolve the IP address and port number for the server
     const address = try net.Address.resolveIp(HOST, PORT);
 
-    // Create a network listener for incoming connections
     var listener = try address.listen(.{
-        // Reuse the address if it's already in use
         .reuse_address = true,
     });
 
-    // Deinitialize the listener when the function returns
     defer listener.deinit();
 
-    // Continuously listen for incoming connections
     while (true) {
-        // Accept an incoming connection
         const client = try listener.accept();
 
-        // Close the client's stream when the function returns
-        defer client.stream.close();
+        // Allocate memory for the client connection
+        const client_ptr = try std.heap.page_allocator.create(net.Server.Connection);
+        client_ptr.* = client;
 
-        // Handle the client's request
-        try handleClient(client);
+        // Create a new thread to handle the client
+        const thread = try std.heap.page_allocator.create(std.Thread);
+        errdefer std.heap.page_allocator.destroy(thread);
+
+        thread.* = try std.Thread.spawn(.{}, handleClientThread, .{client_ptr});
     }
 }
 
-// Handle a client's request
-fn handleClient(client: net.Server.Connection) !void {
-    // Get a writer for the standard output stream
-    const stdout = std.io.getStdOut().writer();
+fn handleClientThread(client_ptr: *net.Server.Connection) void {
+    defer std.heap.page_allocator.destroy(client_ptr);
 
+    handleClient(client_ptr.*) catch |err| {
+        std.debug.print("Error handling client: {s}\n", .{@errorName(err)});
+    };
+    client_ptr.stream.close();
+}
+
+fn handleClient(client: net.Server.Connection) !void {
     // Create a buffer to store the client's request
     var buffer: [1024]u8 = undefined;
 
@@ -52,7 +51,6 @@ fn handleClient(client: net.Server.Connection) !void {
     // Get the client's request as a slice of bytes
     const request = buffer[0..bytes_read];
 
-    // Split the request into lines
     var lines = std.mem.splitSequence(u8, request, "\r\n");
 
     // Get the first line of the request (the request method and URL)
@@ -70,13 +68,9 @@ fn handleClient(client: net.Server.Connection) !void {
     // Get the HTTP version
     _ = parts.next() orelse return error.InvalidRequest;
 
-    // Initialize the User-Agent header value to null
     var user_agent: ?[]const u8 = null;
 
-    // Iterate over the remaining lines of the request
     while (lines.next()) |line| {
-        // Print the line to the standard output stream
-        try stdout.print("{s}\n", .{line});
 
         // Check if the line is the User-Agent header
         if (std.mem.startsWith(u8, line, "User-Agent: ")) {
@@ -104,7 +98,6 @@ fn handleClient(client: net.Server.Connection) !void {
     }
 }
 
-// Send a response to the client
 fn sendResponse(client: net.Server.Connection, status: []const u8, content_type: []const u8, content: []const u8) !void {
     // Create a response string
     const response = try std.fmt.allocPrint(std.heap.page_allocator, "HTTP/1.1 {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\n\r\n{s}", .{ status, content_type, content.len, content });
