@@ -73,7 +73,7 @@ fn handleClient(client: net.Server.Connection) !void {
     var parts = std.mem.splitSequence(u8, first_line, " ");
 
     // Request method
-    _ = parts.next() orelse return error.InvalidRequest;
+    const method = parts.next() orelse return error.InvalidRequest;
 
     // URL path
     const path = parts.next() orelse return error.InvalidRequest;
@@ -82,11 +82,17 @@ fn handleClient(client: net.Server.Connection) !void {
     _ = parts.next() orelse return error.InvalidRequest;
 
     var user_agent: ?[]const u8 = null;
+    var content_length: ?usize = null;
+
+    while (lines.next()) |line| {
+        try std.io.getStdOut().writer().print("Line: {s}\n", .{line});
+    }
 
     while (lines.next()) |line| {
         if (std.mem.startsWith(u8, line, "User-Agent: ")) {
             user_agent = line["User-Agent: ".len..];
-            break;
+        } else if (std.mem.startsWith(u8, line, "Content-Length: ")) {
+            content_length = try std.fmt.parseInt(usize, line["Content-Length: ".len..], 10);
         }
     }
 
@@ -101,7 +107,16 @@ fn handleClient(client: net.Server.Connection) !void {
     } else if (std.mem.startsWith(u8, path, "/files/")) {
         if (files_directory.len > 0) {
             const filename = path[7..];
-            try handleFileRequest(client, files_directory, filename);
+            if (std.mem.eql(u8, method, "GET")) {
+                try handleFileRequest(client, files_directory, filename);
+            } else if (std.mem.eql(u8, method, "POST")) {
+                var body_buffer = try std.heap.page_allocator.alloc(u8, content_length orelse return error.MissingContentLength);
+                defer std.heap.page_allocator.free(body_buffer);
+                _ = try client.stream.read(body_buffer);
+                try handleFileCreation(client, files_directory, filename, body_buffer[0 .. content_length orelse return error.MissingContentLength]);
+            } else {
+                try sendResponse(client, "405 Method Not Allowed", "text/plain", "");
+            }
         } else {
             try sendResponse(client, "404 Not Found", "text/plain", "");
         }
@@ -147,4 +162,18 @@ fn handleFileRequest(client: net.Server.Connection, dir: []const u8, filename: [
 
     try client.stream.writeAll(response);
     try client.stream.writeAll(buffer[0..bytes_read]);
+}
+
+fn handleFileCreation(client: net.Server.Connection, dir: []const u8, filename: []const u8, content: []const u8) !void {
+    const full_path = try std.fs.path.join(std.heap.page_allocator, &[_][]const u8{ dir, filename });
+    defer std.heap.page_allocator.free(full_path);
+
+    try std.io.getStdOut().writer().print("Creating file: {s}\n", .{full_path});
+
+    const file = try std.fs.createFileAbsolute(full_path, .{ .read = true, .truncate = true });
+    defer file.close();
+
+    try file.writeAll(content);
+
+    try sendResponse(client, "201 Created", "text/plain", "");
 }
