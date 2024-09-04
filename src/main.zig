@@ -86,7 +86,6 @@ fn handleClient(client: net.Server.Connection) !void {
     var accept_encoding: ?[]const u8 = null;
 
     while (lines.next()) |line| {
-        try std.io.getStdOut().writer().print("BIG LINE: {s}\n", .{line});
         if (std.mem.startsWith(u8, line, "User-Agent: ")) {
             user_agent = line["User-Agent: ".len..];
         } else if (std.mem.startsWith(u8, line, "Content-Length: ")) {
@@ -147,15 +146,35 @@ fn handleClient(client: net.Server.Connection) !void {
 
 fn sendResponse(client: net.Server.Connection, status: []const u8, content_type: []const u8, content_encoding: ?[]const u8, content: []const u8) !void {
     var response: []u8 = undefined;
+
     if (content_encoding) |encoding| {
-        response = try std.fmt.allocPrint(std.heap.page_allocator, "HTTP/1.1 {s}\r\nContent-Type: {s}\r\nContent-Encoding: {s}\r\nContent-Length: {d}\r\n\r\n{s}", .{ status, content_type, encoding, content.len, content });
+        if (std.mem.eql(u8, encoding, "gzip")) {
+            var compressed = std.ArrayList(u8).init(std.heap.page_allocator);
+            defer compressed.deinit();
+
+            {
+                var gzip = try std.compress.gzip.compressor(compressed.writer(), .{});
+                const bytes_written = try gzip.write(content);
+                if (bytes_written != content.len) {
+                    return error.IncompleteWrite;
+                }
+                try gzip.finish();
+            }
+
+            const response_str = try std.fmt.allocPrint(std.heap.page_allocator, "HTTP/1.1 {s}\r\nContent-Type: {s}\r\nContent-Encoding: {s}\r\nContent-Length: {d}\r\n\r\n", .{ status, content_type, encoding, compressed.items.len });
+            defer std.heap.page_allocator.free(response_str);
+
+            try client.stream.writeAll(response_str);
+            try client.stream.writeAll(compressed.items);
+            return;
+        }
     } else {
-        response = try std.fmt.allocPrint(std.heap.page_allocator, "HTTP/1.1 {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\n\r\n{s}", .{ status, content_type, content.len, content });
+        response = try std.fmt.allocPrint(std.heap.page_allocator, "HTTP/1.1 {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\n\r\n", .{ status, content_type, content.len });
     }
     defer std.heap.page_allocator.free(response);
 
-    try std.io.getStdOut().writer().print("Response: {s}\n", .{response});
     try client.stream.writeAll(response);
+    try client.stream.writeAll(content);
 }
 
 fn sendErrorResponse(client: net.Server.Connection, status: []const u8, message: []const u8) !void {
