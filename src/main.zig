@@ -83,12 +83,20 @@ fn handleClient(client: net.Server.Connection) !void {
 
     var user_agent: ?[]const u8 = null;
     var content_length: ?usize = null;
+    var accept_encoding: ?[]const u8 = null;
 
     while (lines.next()) |line| {
+        try std.io.getStdOut().writer().print("BIG LINE: {s}\n", .{line});
         if (std.mem.startsWith(u8, line, "User-Agent: ")) {
             user_agent = line["User-Agent: ".len..];
         } else if (std.mem.startsWith(u8, line, "Content-Length: ")) {
+            const encoding_header = line["Accept-Encoding: ".len..];
+            try std.io.getStdOut().writer().print("Accept-Encoding header: {s}\n", .{encoding_header});
             content_length = std.fmt.parseInt(usize, line["Content-Length: ".len..], 10) catch null;
+        } else if (std.mem.startsWith(u8, line, "Accept-Encoding: ")) {
+            if (std.mem.indexOf(u8, line["Accept-Encoding: ".len..], "gzip") != null) {
+                accept_encoding = "gzip";
+            }
         }
     }
 
@@ -109,12 +117,12 @@ fn handleClient(client: net.Server.Connection) !void {
 
     // Handle the request based on the URL path
     if (std.mem.eql(u8, path, "/")) {
-        try sendResponse(client, "200 OK", "text/plain", "");
+        try sendResponse(client, "200 OK", "text/plain", accept_encoding, "");
     } else if (std.mem.startsWith(u8, path, "/echo/")) {
         const echo_path = path[6..];
-        try sendResponse(client, "200 OK", "text/plain", echo_path);
+        try sendResponse(client, "200 OK", "text/plain", accept_encoding, echo_path);
     } else if (std.mem.eql(u8, path, "/user-agent")) {
-        try sendResponse(client, "200 OK", "text/plain", user_agent orelse "");
+        try sendResponse(client, "200 OK", "text/plain", accept_encoding, user_agent orelse "");
     } else if (std.mem.startsWith(u8, path, "/files/")) {
         if (files_directory.len > 0) {
             const filename = path[7..];
@@ -124,25 +132,34 @@ fn handleClient(client: net.Server.Connection) !void {
                 if (content_length != null and body.len > 0) {
                     try handleFileCreation(client, files_directory, filename, body);
                 } else {
-                    try sendResponse(client, "400 Bad Request", "text/plain", "Missing or Invalid Content-Length Header");
+                    try sendErrorResponse(client, "400 Bad Request", "Missing or Invalid Content-Length Header");
                 }
             } else {
-                try sendResponse(client, "405 Method Not Allowed", "text/plain", "");
+                try sendErrorResponse(client, "405 Method Not Allowed", "");
             }
         } else {
-            try sendResponse(client, "404 Not Found", "text/plain", "");
+            try sendErrorResponse(client, "404 Not Found", "");
         }
     } else {
-        try sendResponse(client, "404 Not Found", "text/plain", "");
+        try sendResponse(client, "404 Not Found", "text/plain", accept_encoding, "");
     }
 }
 
-fn sendResponse(client: net.Server.Connection, status: []const u8, content_type: []const u8, content: []const u8) !void {
-    const response = try std.fmt.allocPrint(std.heap.page_allocator, "HTTP/1.1 {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\n\r\n{s}", .{ status, content_type, content.len, content });
-
+fn sendResponse(client: net.Server.Connection, status: []const u8, content_type: []const u8, content_encoding: ?[]const u8, content: []const u8) !void {
+    var response: []u8 = undefined;
+    if (content_encoding) |encoding| {
+        response = try std.fmt.allocPrint(std.heap.page_allocator, "HTTP/1.1 {s}\r\nContent-Type: {s}\r\nContent-Encoding: {s}\r\nContent-Length: {d}\r\n\r\n{s}", .{ status, content_type, encoding, content.len, content });
+    } else {
+        response = try std.fmt.allocPrint(std.heap.page_allocator, "HTTP/1.1 {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\n\r\n{s}", .{ status, content_type, content.len, content });
+    }
     defer std.heap.page_allocator.free(response);
 
+    try std.io.getStdOut().writer().print("Response: {s}\n", .{response});
     try client.stream.writeAll(response);
+}
+
+fn sendErrorResponse(client: net.Server.Connection, status: []const u8, message: []const u8) !void {
+    try sendResponse(client, status, "text/plain", null, message);
 }
 
 fn handleFileRequest(client: net.Server.Connection, dir: []const u8, filename: []const u8) !void {
@@ -153,7 +170,7 @@ fn handleFileRequest(client: net.Server.Connection, dir: []const u8, filename: [
 
     const file = std.fs.openFileAbsolute(full_path, .{ .mode = .read_only }) catch |err| {
         if (err == error.FileNotFound) {
-            try sendResponse(client, "404 Not Found", "application/octet-stream", "");
+            try sendErrorResponse(client, "404 Not Found", "");
             return;
         }
         return err;
@@ -186,5 +203,5 @@ fn handleFileCreation(client: net.Server.Connection, dir: []const u8, filename: 
 
     try file.writeAll(content);
 
-    try sendResponse(client, "201 Created", "text/plain", "");
+    try sendResponse(client, "201 Created", "text/plain", null, "");
 }
