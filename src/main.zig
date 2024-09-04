@@ -9,8 +9,6 @@ var files_directory: []const u8 = undefined;
 pub fn main() !void {
     const stdout = std.io.getStdOut().writer();
 
-    try stdout.print("Logs from your program will appear here!\n", .{});
-
     // Parse command line arguments
     const args = try std.process.argsAlloc(std.heap.page_allocator);
     defer std.process.argsFree(std.heap.page_allocator, args);
